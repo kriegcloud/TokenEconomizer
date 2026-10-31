@@ -173,7 +173,8 @@ def claude_result(stdout):
     return data if isinstance(data, dict) else {}
 
 
-def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S, scrub_env=False):
+def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S, scrub_env=False,
+                max_output=None):
     cli = cli or claude_cli()
     with tempfile.TemporaryDirectory(prefix="te-side-") as cwd:
         # `--mcp-config` takes several values, so an option follows it, never a bare argument.
@@ -185,6 +186,8 @@ def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S, scrub_env=Fa
                         "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
                         "ANTHROPIC_DEFAULT_OPUS_MODEL"):
                 env.pop(key, None)
+        if max_output:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(int(max_output))
         out = subprocess.run(cmd, input=prompt, capture_output=True,
                              encoding="utf-8", errors="replace", timeout=timeout, env=env,
                              cwd=cwd)
@@ -385,10 +388,11 @@ def copilot_call(prompt, model="", cli="copilot", timeout=TIMEOUT_S):
     return text, eff
 
 
-def runner_for(host_name, config):
+def runner_for(host_name, config, max_output=None):
     """The optimizer callable for this host. Each host's calls go through that host's own CLI,
     never another agent's. The caller decides whether a call is allowed: micro-skills' proposer
-    when micro-skills is on, the loop guard's judge when the guard is."""
+    when micro-skills is on, the loop guard's judge when the guard is. `max_output` caps a
+    Claude call's output tokens, thinking included; the other CLIs take no such limit."""
     model = config.paid_model
     if host_name == "pi":
         return lambda prompt, _m="agent": pi_call(prompt, model=model)
@@ -399,4 +403,5 @@ def runner_for(host_name, config):
     if host_name == "copilot":
         return lambda prompt, _m="agent": copilot_call(prompt, model=model)
     return lambda prompt, _m="agent": claude_call(
-        prompt, model=model or "haiku", scrub_env=config.sidecall_scrub_env)
+        prompt, model=model or "haiku", scrub_env=config.sidecall_scrub_env,
+        max_output=max_output)

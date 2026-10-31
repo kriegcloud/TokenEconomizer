@@ -10,7 +10,7 @@ import tempfile
 import time
 from dataclasses import replace
 
-from .. import loopguard
+from .. import loopguard, pricing
 from ..trace import claude, codex
 from . import accounting, facts, fold, hosts, paths, repos, sidecall
 from .config import load_config
@@ -96,8 +96,27 @@ def census(since, host_names, repo_path=None, env=None, include_folded=False):
     return sorted(rows, key=lambda r: (r["started"], r["host"], r["session_id"])), skipped, mappings
 
 
-# A planning allowance, not measured output or a provider billing guarantee.
-PAID_OUTPUT_RESERVE = 4096
+# The paid pass's estimate is an upper bound in the paid model's effective tokens (pricing.py's
+# fresh-input equivalents), so it can be compared with the cap and with what the call reports.
+# Calibrated on Claude Code 2.1.316 with claude-opus-5-5: a 602k-character proposer prompt
+# estimated as 153k (chars/4, 4096 output at 1x) reported 461k, because
+#   * the prompt is written to the prompt cache (1.25x), not read as plain input;
+#   * every side call also carries the CLI's own context (~17k tokens: its system prompt and the
+#     person's global instructions and memory), cache-written when cold;
+#   * output, adaptive thinking included, is billed at 5x and ran to ~50k tokens uncapped.
+# The call's output is therefore capped (CLAUDE_CODE_MAX_OUTPUT_TOKENS) at the reserve, and
+# characters are counted at 3 per token, since JSON digests tokenize denser than prose.
+PAID_OUTPUT_RESERVE = 32000
+PAID_SIDE_CONTEXT = 20000
+PAID_CHARS_PER_TOKEN = 3
+
+
+def paid_estimate(prompt_chars, model):
+    """Upper-bound effective tokens of one paid proposer call with a prompt this long."""
+    w = pricing.weights_for({"model": model or "claude"})
+    prompt = -(-prompt_chars // PAID_CHARS_PER_TOKEN)
+    return round(w["cache_write"] * (prompt + PAID_SIDE_CONTEXT)
+                 + w["output"] * PAID_OUTPUT_RESERVE)
 
 
 def paid_stream(rows, repo_path=None, env=None):
@@ -135,7 +154,7 @@ def _digest(row):
 
 
 def paid_sample(rows, cap):
-    """Budget the serialized proposer input (chars/4) plus one output reserve."""
+    """Newest first, while the call's upper-bound estimate (`paid_estimate`) fits the cap."""
     from ..microskills.distiller import build_proposer_prompt
     selected, digests, tokens = [], [], 0
     for row in sorted(rows, key=lambda r: r["started"], reverse=True):
@@ -146,7 +165,7 @@ def paid_sample(rows, cap):
             continue
         prompt = build_proposer_prompt(row["_ctx"].repo.label, digests + [dg],
                                        {}, set(), [], generic=_generic(row))
-        estimate = (len(prompt) + 3) // 4 + PAID_OUTPUT_RESERVE
+        estimate = paid_estimate(len(prompt), row["_ctx"].config.paid_model)
         if estimate > cap:
             break
         selected.append(row)
@@ -202,9 +221,10 @@ def _paid_pass(rows, cap):
             from ..microskills.envfacts import EnvFactsDistiller
             env = EnvFactsDistiller.load(ctx.repo.label, dst.ensure("mechanisms"),
                                          vocab=adapter.env_vocabulary())
-            runner = sidecall.runner_for(ctx.host.name, ctx.config)
+            runner = sidecall.runner_for(ctx.host.name, ctx.config,
+                                         max_output=PAID_OUTPUT_RESERVE)
             def budgeted_runner(prompt, model):
-                if (len(prompt) + 3) // 4 + PAID_OUTPUT_RESERVE > cap:
+                if paid_estimate(len(prompt), ctx.config.paid_model) > cap:
                     raise ValueError("prepared proposer prompt exceeds paid cap")
                 return runner(prompt, model)
             dist = Distiller.load(ctx.repo.label, dst.ensure("mechanisms"),
@@ -264,8 +284,9 @@ def run(since="30d", host_names=("claude", "codex"), repo_path=None, apply=False
            "paid_output_reserve": PAID_OUTPUT_RESERVE,
            "paid_selection_note": "At most one call: --repo, else cwd repository, else busiest "
                                   "main-session fact stream (busiest host within a repository). "
-                                  "Estimated proposer tokens = prompt chars/4 (instructions once) "
-                                  "+ 4096 output reserve; source usage is "
+                                  "Estimated proposer cost = upper bound in effective tokens: "
+                                  "(prompt chars/3 + 20k CLI context) x cache-write weight + "
+                                  "32k output cap x output weight; source usage is "
                                   "not budgeted. No history digest-count bound; live window is 8. "
                                   "Actual optimizer overhead is recorded separately."}
     if not apply or not rows:

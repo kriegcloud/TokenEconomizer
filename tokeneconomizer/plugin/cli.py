@@ -537,7 +537,7 @@ def cmd_backfill(args):
             reasons[row["reason"]] = reasons.get(row["reason"], 0) + 1
         for reason, count in sorted(reasons.items()):
             print(f"  skipped {count}: {reason}")
-        print(f"  estimated proposer prompt + output reserve: {out['projected_paid_tokens']:.0f} tokens "
+        print(f"  estimated paid call (upper bound, effective tokens): {out['projected_paid_tokens']:.0f} tokens "
               f"(cap {out['paid_cap']}); {out['folded']} folded")
         print("  " + out["paid_selection_note"])
         for paid in out["paid"]:

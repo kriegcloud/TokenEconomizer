@@ -78,8 +78,11 @@ existing per-agent facts in, keeping the most-confirmed copy of any duplicate.
 
 `te backfill --apply` ends with one proposer run over recent main-session digests, selected
 newest-first until the next digest would exceed `backfill_paid_cap` (default 500000; 0 skips).
-The cap estimates the paid pass itself: serialized digest prompt characters / 4, including
-fixed proposer instructions once, plus 4096 reserved output tokens. Original sessions' effective
+The cap bounds the paid pass itself, in the paid model's effective tokens: the serialized
+prompt at one token per three characters plus ~20k tokens of the CLI's own context, both priced
+as cache writes, plus a 32k output reserve priced as output. The Claude call's output (thinking
+included) is capped at that reserve with `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. Calibration: the first
+real pass estimated 153k under the old chars/4 rule and reported 461k. Original sessions' effective
 usage does not consume this budget. `projected_paid_tokens` reports the estimate; actual
 optimizer overhead remains separate. The complete prepared prompt is checked again before
 calling, including learned facts and features. This estimate is not a provider billing guarantee.

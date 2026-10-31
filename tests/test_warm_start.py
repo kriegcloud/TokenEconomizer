@@ -24,7 +24,7 @@ def private_home(tmp_path, monkeypatch):
     monkeypatch.setenv("TOKENECONOMIZER_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("TE_FOLD_SYNC", "1")
     monkeypatch.setenv("TE_BACKFILL_PAID_CAP", "0")
-    monkeypatch.setattr(sidecall, "runner_for", lambda *a: pytest.fail("unexpected paid call"))
+    monkeypatch.setattr(sidecall, "runner_for", lambda *a, **k: pytest.fail("unexpected paid call"))
 
 
 def log(path, records):
@@ -225,12 +225,12 @@ def test_one_paid_call_after_free_replay(tmp_path, monkeypatch):
         assert context(repo).store.read("untool.json")["sessions"] == 5
         calls.append(prompt)
         return '{"facts": [], "extractors": []}', 42
-    monkeypatch.setattr(sidecall, "runner_for", lambda *a: runner)
+    monkeypatch.setattr(sidecall, "runner_for", lambda *a, **k: runner)
     out = backfill.run(apply=True)
     assert len(calls) == 1 and len(out["paid"]) == 1
     assert calls[0].index('"iid": "s0"') < calls[0].index('"iid": "s4"')
     assert out["paid"][0]["optimizer_tokens"] == 42
-    assert (len(calls[0]) + 3) // 4 + backfill.PAID_OUTPUT_RESERVE <= 500000
+    assert backfill.paid_estimate(len(calls[0]), "claude-opus-5-5") <= 500000
     assert out["paid"][0]["estimated_proposer_tokens"] <= 500000
     backfill.run(apply=True)
     assert len(calls) == 1
@@ -434,7 +434,7 @@ def test_shared_backfill_uses_one_paid_call_across_hosts(tmp_path, monkeypatch):
     monkeypatch.setenv("TE_MICROSKILLS_SCOPE", "repo")
     monkeypatch.setenv("TE_BACKFILL_PAID_CAP", "500000")
     calls = []
-    monkeypatch.setattr(sidecall, "runner_for", lambda *a: lambda p, m: (
+    monkeypatch.setattr(sidecall, "runner_for", lambda *a, **k: lambda p, m: (
         calls.append(p) or '{"facts": []}', 12))
     out = backfill.run(apply=True)
     assert out["folded"] == 2 and len(calls) == 1
@@ -456,7 +456,7 @@ def test_paid_pass_is_one_call_with_separate_host_streams(tmp_path, monkeypatch)
               age=2 * 86400)
     monkeypatch.setenv("TE_BACKFILL_PAID_CAP", "500000")
     calls = []
-    monkeypatch.setattr(sidecall, "runner_for", lambda host, cfg: lambda p, m: (
+    monkeypatch.setattr(sidecall, "runner_for", lambda host, cfg, **k: lambda p, m: (
         calls.append(host) or '{"facts": []}', 12))
     out = backfill.run(apply=True)
     assert out["folded"] == 2 and calls == ["claude"]
@@ -482,14 +482,14 @@ def test_retry_paid_reruns_only_a_failed_paid_pass(tmp_path, monkeypatch):
     def failing(prompt, model):
         calls.append(prompt)
         raise AttributeError("'list' object has no attribute 'get'")
-    monkeypatch.setattr(sidecall, "runner_for", lambda *a: failing)
+    monkeypatch.setattr(sidecall, "runner_for", lambda *a, **k: failing)
     out = backfill.run(apply=True)
     assert out["paid"][0]["error"] and len(calls) == 1
     assert backfill.run(apply=True)["paid"] == []
     def runner(prompt, model):
         calls.append(prompt)
         return '{"facts": [], "extractors": []}', 7
-    monkeypatch.setattr(sidecall, "runner_for", lambda *a: runner)
+    monkeypatch.setattr(sidecall, "runner_for", lambda *a, **k: runner)
     source(repo, "s9", age=3600)
     out = backfill.run(apply=True, retry_paid=True)
     assert len(calls) == 2 and out["folded"] == 1
@@ -497,3 +497,33 @@ def test_retry_paid_reruns_only_a_failed_paid_pass(tmp_path, monkeypatch):
     assert out["paid"][0]["error"] is None and out["paid"][0]["optimizer_tokens"] == 7
     assert backfill.run(apply=True, retry_paid=True)["paid"] == []
     assert len(calls) == 2
+
+
+def test_paid_estimate_covers_the_calibration_call():
+    # 602k prompt characters on claude-opus-5-5 reported 461k effective tokens with output
+    # uncapped (~50k); capped at the reserve the bound must still cover the prompt and context.
+    est = backfill.paid_estimate(602213, "claude-opus-5-5")
+    assert est >= 1.25 * (602213 / 4 + 17000) + 5 * backfill.PAID_OUTPUT_RESERVE
+    assert est < 500000
+
+
+@pytest.mark.real_sidecalls
+def test_paid_runner_caps_claude_output(monkeypatch):
+    seen = {}
+    def fake_run(cmd, **kw):
+        seen.update(kw["env"])
+        class Out:
+            stdout = json.dumps([{"type": "result", "result": "{}",
+                                  "usage": {"input_tokens": 1, "output_tokens": 1}}])
+            stderr = ""
+            returncode = 0
+        return Out()
+    monkeypatch.setattr(sidecall.subprocess, "run", fake_run)
+    monkeypatch.setattr(sidecall, "claude_flags", lambda cli=None: [])
+    monkeypatch.setattr(sidecall, "claude_no_mcp", lambda cli, cwd: [])
+    monkeypatch.delenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", raising=False)
+    sidecall.claude_call("p", model="claude-opus-5-5", cli="claude", max_output=32000)
+    assert seen["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
+    seen.clear()
+    sidecall.claude_call("p", model="claude-opus-5-5", cli="claude")
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in seen

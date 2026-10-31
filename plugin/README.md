@@ -546,9 +546,12 @@ facts. Tool pruning gathers proposals without changing checkout settings. Comple
 supply envelope samples tagged `source=backfill`; interrupted or unfinished turns do not.
 
 The final paid pass selects newest-first until adding the next digest would exceed the cap.
-It builds the same digests the distiller sends, estimates serialized prompt tokens at one token
-per four characters (including fixed proposer instructions once), and reserves 4096 output
-tokens. `projected_paid_tokens` reports this estimated proposer cost, independent of the source
+It builds the same digests the distiller sends and estimates the call as an upper bound in the
+paid model's effective tokens: the prompt at one token per three characters plus ~20k tokens of
+the CLI's own context, priced as cache writes, plus a 32000-token output reserve priced as
+output. On Claude the call's output, thinking included, is capped at that reserve
+(`CLAUDE_CODE_MAX_OUTPUT_TOKENS`); Codex takes no such cap, so there the reserve is only an
+estimate. `projected_paid_tokens` reports this estimated proposer cost, independent of the source
 sessions' effective usage, which may be millions of tokens or unknown. Actual optimizer
 overhead is recorded separately. This is an estimate, not a provider billing guarantee; the
 fully prepared prompt is checked again before calling, including learned facts and features.
