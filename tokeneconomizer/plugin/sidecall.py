@@ -159,6 +159,20 @@ def claude_no_mcp(cli, cwd):
     return ["--strict-mcp-config", "--mcp-config", path]
 
 
+def claude_result(stdout):
+    """The result object of `claude -p --output-format json`. Up to 2.1.310 that output is the
+    object itself; 2.1.316 prints the whole event list (`system`, `assistant`, ..., `result`),
+    so the last `result` event is taken. Anything unreadable is an empty object."""
+    try:
+        data = json.loads(stdout or "{}")
+    except ValueError:
+        return {}
+    if isinstance(data, list):
+        data = next((e for e in reversed(data)
+                     if isinstance(e, dict) and e.get("type") == "result"), {})
+    return data if isinstance(data, dict) else {}
+
+
 def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S, scrub_env=False):
     cli = cli or claude_cli()
     with tempfile.TemporaryDirectory(prefix="te-side-") as cwd:
@@ -174,10 +188,7 @@ def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S, scrub_env=Fa
         out = subprocess.run(cmd, input=prompt, capture_output=True,
                              encoding="utf-8", errors="replace", timeout=timeout, env=env,
                              cwd=cwd)
-    try:
-        data = json.loads(out.stdout or "{}")
-    except ValueError:
-        data = {}
+    data = claude_result(out.stdout)
     if not data.get("result"):
         _no_reply("claude", out)
     usage = dict(data.get("usage") or {})

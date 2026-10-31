@@ -461,3 +461,13 @@ def test_paid_pass_is_one_call_with_separate_host_streams(tmp_path, monkeypatch)
     out = backfill.run(apply=True)
     assert out["folded"] == 2 and calls == ["claude"]
     assert out["paid"][0]["sessions"] == ["s1"]
+
+
+def test_claude_result_reads_object_and_event_list():
+    from tokeneconomizer.plugin.sidecall import claude_result
+    obj = {"type": "result", "result": "ok", "usage": {"input_tokens": 3}}
+    assert claude_result(json.dumps(obj)) == obj
+    events = [{"type": "system", "subtype": "init"}, {"type": "assistant"}, obj]
+    assert claude_result(json.dumps(events)) == obj
+    assert claude_result("not json") == {}
+    assert claude_result(json.dumps([{"type": "system"}])) == {}
