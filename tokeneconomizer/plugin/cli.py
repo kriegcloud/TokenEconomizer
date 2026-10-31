@@ -519,7 +519,7 @@ def cmd_backfill(args):
     from . import backfill
     try:
         out = backfill.run(args.since, tuple(h.strip() for h in args.hosts.split(",")),
-                           args.repo, args.apply)
+                           args.repo, args.apply, retry_paid=args.retry_paid)
     except (ValueError, RuntimeError) as e:
         print(f"backfill: {e}", file=sys.stderr)
         return 2
@@ -768,6 +768,8 @@ def build_parser():
     p.add_argument("--hosts", default="claude,codex")
     p.add_argument("--repo")
     p.add_argument("--apply", action="store_true")
+    p.add_argument("--retry-paid", action="store_true",
+                   help="with --apply: rerun a paid pass that failed, over folded sessions")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_backfill)
     p = add("status")

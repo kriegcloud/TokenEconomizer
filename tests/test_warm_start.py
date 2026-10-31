@@ -471,3 +471,27 @@ def test_claude_result_reads_object_and_event_list():
     assert claude_result(json.dumps(events)) == obj
     assert claude_result("not json") == {}
     assert claude_result(json.dumps([{"type": "system"}])) == {}
+
+
+def test_retry_paid_reruns_only_a_failed_paid_pass(tmp_path, monkeypatch):
+    repo = checkout(tmp_path / "repo")
+    for i in range(3):
+        source(repo, "s" + str(i), age=(i + 1) * 86400)
+    monkeypatch.setenv("TE_BACKFILL_PAID_CAP", "500000")
+    calls = []
+    def failing(prompt, model):
+        calls.append(prompt)
+        raise AttributeError("'list' object has no attribute 'get'")
+    monkeypatch.setattr(sidecall, "runner_for", lambda *a: failing)
+    out = backfill.run(apply=True)
+    assert out["paid"][0]["error"] and len(calls) == 1
+    assert backfill.run(apply=True)["paid"] == []
+    def runner(prompt, model):
+        calls.append(prompt)
+        return '{"facts": [], "extractors": []}', 7
+    monkeypatch.setattr(sidecall, "runner_for", lambda *a: runner)
+    out = backfill.run(apply=True, retry_paid=True)
+    assert len(calls) == 2 and out["folded"] == 0
+    assert out["paid"][0]["error"] is None and out["paid"][0]["optimizer_tokens"] == 7
+    assert backfill.run(apply=True, retry_paid=True)["paid"] == []
+    assert len(calls) == 2

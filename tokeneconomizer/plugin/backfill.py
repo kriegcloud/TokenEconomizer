@@ -34,8 +34,10 @@ def _context(host, repo, env):
                        load_config(root, os.path.dirname(base), env), dict(env))
 
 
-def census(since, host_names, repo_path=None, env=None):
-    """Read-only plan: candidate rows include contexts privately; public rows are JSON-safe."""
+def census(since, host_names, repo_path=None, env=None, include_folded=False):
+    """Read-only plan: candidate rows include contexts privately; public rows are JSON-safe.
+    `include_folded` keeps already-folded sessions as candidates (a paid retry samples them;
+    the fold loop still skips them)."""
     env = dict(os.environ if env is None else env)
     root = paths.state_root(env)
     target_repo = paths.repo_identity(repo_path, env) if repo_path else None
@@ -67,7 +69,7 @@ def census(since, host_names, repo_path=None, env=None):
             elif target and repo.key != target:
                 reason = reason or "other repository"
             ctx = _context(host, repo, env) if repo else None
-            if ctx and sid in (ctx.store.read("folded.json") or {}):
+            if ctx and not include_folded and sid in (ctx.store.read("folded.json") or {}):
                 reason = reason or "already folded"
             if started > time.time():
                 reason = reason or "future timestamp"
@@ -235,12 +237,16 @@ def _paid_pass(rows, cap):
     return out
 
 
-def run(since="30d", host_names=("claude", "codex"), repo_path=None, apply=False, env=None):
-    """Plan first, then pin/fold only new sessions. A no-op rerun makes no paid call."""
+def run(since="30d", host_names=("claude", "codex"), repo_path=None, apply=False, env=None,
+        retry_paid=False):
+    """Plan first, then pin/fold only new sessions. A no-op rerun makes no paid call, unless
+    `retry_paid` asks again for a stream whose paid pass never succeeded (no
+    `backfill-proposer.json`): its already-folded sessions are then the sample."""
     start = cutoff(since)
     if not host_names or any(h not in READERS for h in host_names):
         raise ValueError("--hosts accepts claude,codex")
-    rows, skipped, mappings = census(start, host_names, repo_path, env)
+    rows, skipped, mappings = census(start, host_names, repo_path, env,
+                                     include_folded=retry_paid)
     cap = min((r["_ctx"].config.backfill_paid_cap for r in rows), default=0)
     stream = paid_stream(rows, repo_path, env)
     sample, projected = paid_sample(stream, cap) if cap else ([], 0)
@@ -293,16 +299,21 @@ def run(since="30d", host_names=("claude", "codex"), repo_path=None, apply=False
                 if row["_mapping"]:
                     Store(root).append("backfill-mappings.jsonl", dict(row["_mapping"],
                                        host=ctx.host.name, session_id=sid, at=time.time()))
-        sample, projected = paid_sample([r for r in completed if r in stream], cap) if cap else ([], 0)
+        pool = [r for r in completed if r in stream]
+        if retry_paid and not pool:
+            pool = [r for r in stream
+                    if facts.store_for(r["_ctx"]).read("backfill-proposer.json") is None]
+        sample, projected = paid_sample(pool, cap) if cap else ([], 0)
         out["paid_sample"] = [{k: r[k] for k in ("session_id", "host", "repo_key",
                                                     "effective_tokens")} for r in sample]
         out["projected_paid_tokens"] = projected
         out["paid"] = _paid_pass(sample, cap)
         out["folded"] = len(completed)
-        for base in sorted({r["_ctx"].store.base for r in completed}):
+        for base in sorted({r["_ctx"].store.base for r in completed + sample}):
             own = [r for r in completed if r["_ctx"].store.base == base]
-            paid = [p for p in out["paid"] if p["host"] == own[0]["host"]
-                    and p["repo_key"] == own[0]["repo_key"]]
+            ref = (own or [r for r in sample if r["_ctx"].store.base == base])[0]
+            paid = [p for p in out["paid"] if p["host"] == ref["host"]
+                    and p["repo_key"] == ref["repo_key"]]
             Store(base).append("ledger.jsonl", {"kind": "backfill", "at": time.time(),
                 "since": since, "cutoff": start, "sessions": len(own),
                 "sidechains": sum(r["role"] == "sidechain" for r in own), "paid": paid,
