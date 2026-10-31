@@ -300,9 +300,10 @@ def run(since="30d", host_names=("claude", "codex"), repo_path=None, apply=False
                     Store(root).append("backfill-mappings.jsonl", dict(row["_mapping"],
                                        host=ctx.host.name, session_id=sid, at=time.time()))
         pool = [r for r in completed if r in stream]
-        if retry_paid and not pool:
-            pool = [r for r in stream
-                    if facts.store_for(r["_ctx"]).read("backfill-proposer.json") is None]
+        retry = [r for r in stream
+                 if facts.store_for(r["_ctx"]).read("backfill-proposer.json") is None]
+        if retry_paid and retry:
+            pool = retry        # the whole stream, not just what ended since the failed pass
         sample, projected = paid_sample(pool, cap) if cap else ([], 0)
         out["paid_sample"] = [{k: r[k] for k in ("session_id", "host", "repo_key",
                                                     "effective_tokens")} for r in sample]

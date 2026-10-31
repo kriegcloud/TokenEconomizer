@@ -490,8 +490,10 @@ def test_retry_paid_reruns_only_a_failed_paid_pass(tmp_path, monkeypatch):
         calls.append(prompt)
         return '{"facts": [], "extractors": []}', 7
     monkeypatch.setattr(sidecall, "runner_for", lambda *a: runner)
+    source(repo, "s9", age=3600)
     out = backfill.run(apply=True, retry_paid=True)
-    assert len(calls) == 2 and out["folded"] == 0
+    assert len(calls) == 2 and out["folded"] == 1
+    assert len(out["paid"][0]["sessions"]) == 4
     assert out["paid"][0]["error"] is None and out["paid"][0]["optimizer_tokens"] == 7
     assert backfill.run(apply=True, retry_paid=True)["paid"] == []
     assert len(calls) == 2
