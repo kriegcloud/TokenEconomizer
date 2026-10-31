@@ -24,7 +24,7 @@ import os
 import time
 
 from .. import loopguard
-from . import denylist, fold, repomap, repos, sidecall
+from . import arms, denylist, fold, repomap, repos, sidecall
 from .hosts import merge_outputs
 from .paths import ensure_launcher
 
@@ -39,6 +39,7 @@ class LiveController:
         self.store = ctx.store
         self.cfg = ctx.config
         self.sid = self.host.session_id(self.p)
+        self.held_out = self._session().get("arm") == "holdout"
 
     # ---- plumbing -----------------------------------------------------------------------
     def _sess_name(self):
@@ -51,7 +52,9 @@ class LiveController:
             # to tell which repository the session belongs to, when its log does not say.
             s = {"session_id": self.sid, "host": self.host.name, "started": time.time(),
                  "cwd": self.host.cwd(self.p, self.ctx.env), "turns": [], "nudges": 0,
+                 "arm": arms.assignment(self.sid, self.cfg.holdout),
                  "aborts": 0, "judge_tokens": 0.0, "writer_tokens": 0.0}
+        s.setdefault("arm", arms.assignment(self.sid, self.cfg.holdout))
         return s
 
     def _save(self, s):
@@ -82,6 +85,7 @@ class LiveController:
             return {}
         self.ctx.settle()
         self.cfg = self.ctx.config
+        self.held_out = self._session().get("arm") == "holdout"
         event = self.p.get("hook_event_name") or ""
         # PostToolUseFailure: Copilot reports a failed tool there, not in PostToolUse.
         handler = {"SessionStart": self.session_start, "UserPromptSubmit": self.user_prompt,
@@ -103,8 +107,8 @@ class LiveController:
         seen = self.store.read("notices.json") or {}
         seen_before = dict(seen)
 
-        if self.cfg.microskills != "off":
-            inj = self.store.read("injection.json") or {}
+        if self.cfg.microskills != "off" and not self.held_out:
+            inj = self.ctx.facts_store.read("injection.json") or {}
             text = inj.get("rendered") or ""
             # A resumed or forked conversation already carries what the first start injected,
             # where the agent replays it; a cleared or compacted one has lost it. ("new" is
@@ -133,7 +137,7 @@ class LiveController:
                         seen["injection"] = digest
 
         if (self.cfg.toolprune != "off" and denylist.supports(self.host.name)
-                and not self.cfg.shadow):
+                and not self.cfg.shadow and not self.held_out):
             outputs.extend(self._toolprune_notices(seen))
 
         pause = sidecall.paused(self.host.name, self.ctx.root)
@@ -154,7 +158,7 @@ class LiveController:
         if note and not self.cfg.shadow:
             outputs.append(self.host.notice(note))
 
-        if self.cfg.repomap != "off":
+        if self.cfg.repomap != "off" and not self.held_out:
             if repomap.stale(self.ctx):
                 repomap.spawn_refresh(self.ctx)
             at_start = self.cfg.repomap == "start" or not self.host.prompt_context
@@ -250,7 +254,8 @@ class LiveController:
             return {}
         s = self._session()
         outputs = []
-        if self.cfg.repomap == "on" and self.host.prompt_context and not s.get("repomap_done"):
+        if (self.cfg.repomap == "on" and self.host.prompt_context
+                and not self.held_out and not s.get("repomap_done")):
             # Once per session, on its first prompt: a map ranked toward what the prompt names.
             s["repomap_done"] = True
             seen = self.store.read("notices.json") or {}
@@ -318,9 +323,13 @@ class LiveController:
         # agents ran under a turn cap, hence their envelope gate).
         thr = dict(thr, gate_over_envelope=False,
                    gate_min_turns=max(thr["gate_min_turns"], thr["min_turns"]))
-        decision = g.fold(name, args, text, code, envelope=envelope, thr=thr,
-                          judge=self._judge(thr, envelope),
-                          nudge_budget=self.cfg.loopguard_nudges)
+        decision = None
+        if self.held_out:
+            g.observe(name, args, text, code)
+        else:
+            decision = g.fold(name, args, text, code, envelope=envelope, thr=thr,
+                              judge=self._judge(thr, envelope),
+                              nudge_budget=self.cfg.loopguard_nudges)
         out = {}
         if decision:
             action, reason = decision

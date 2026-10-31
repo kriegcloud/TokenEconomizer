@@ -167,3 +167,59 @@ def claude_deferred_tools(transcript_path):
         names.update(n for n in (att.get("addedNames") or []) if isinstance(n, str))
         names.difference_update(n for n in (att.get("removedNames") or []) if isinstance(n, str))
     return names
+
+
+def discover(since, root=None):
+    """Yield (id, path, first cwd, started, sidechain), including nested subagent logs.
+
+    A subagent often repeats its parent's sessionId, so its file stem is part of its id.
+    `root` is the projects directory; tests supply a synthetic one.
+    """
+    from .discovery import timestamp
+    from .jsonl import records
+    root = root or os.path.expanduser("~/.claude/projects")
+    files = set(glob.glob(os.path.join(root, "*", "*.jsonl")))
+    files.update(glob.glob(os.path.join(root, "*", "*", "subagents", "*.jsonl")))
+    files.update(glob.glob(os.path.join(root, "*", "subagents", "*.jsonl")))
+    for path in sorted(files):
+        sid, cwd, started = None, None, None
+        side = "subagents" in os.path.relpath(path, root).split(os.sep)
+        for ev in records(path):
+            sid = sid or ev.get("sessionId")
+            cwd = cwd or ev.get("cwd")
+            if started is None:
+                started = timestamp(ev.get("timestamp"))
+            side = side or ev.get("isSidechain") is True
+        if started is None or started < since:
+            continue
+        stem = os.path.splitext(os.path.basename(path))[0]
+        sid = str(sid or stem)
+        if side:
+            sid += "--" + stem
+        yield sid, path, cwd, started, bool(side)
+
+
+def turns(transcript_path):
+    """Prompt-turn calls and whether the log shows a normal assistant completion.
+
+    An interruption or an unfinished tool request never supplies an ended-green sample.
+    """
+    from .jsonl import records
+    lines, ended = [], False
+    for ev in records(transcript_path):
+        if _is_prompt(ev) and lines:
+            yield [c[:4] for c in claude_calls(lines)], ended
+            lines, ended = [], False
+        lines.append(json.dumps(ev))
+        if ev.get("type") == "assistant":
+            msg = ev.get("message") or {}
+            blocks = msg.get("content") or []
+            ended = (msg.get("stop_reason") == "end_turn" or (
+                not msg.get("stop_reason") and isinstance(blocks, list)
+                and any(isinstance(b, dict) and b.get("type") == "text" for b in blocks)
+                and not any(isinstance(b, dict) and b.get("type") == "tool_use"
+                            for b in blocks)))
+        elif ev.get("type") == "user":
+            ended = False
+    if lines:
+        yield [c[:4] for c in claude_calls(lines)], ended

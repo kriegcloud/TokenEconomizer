@@ -159,14 +159,20 @@ def claude_no_mcp(cli, cwd):
     return ["--strict-mcp-config", "--mcp-config", path]
 
 
-def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S):
+def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S, scrub_env=False):
     cli = cli or claude_cli()
     with tempfile.TemporaryDirectory(prefix="te-side-") as cwd:
         # `--mcp-config` takes several values, so an option follows it, never a bare argument.
         cmd = ([cli, "-p", "--output-format", "json", "--max-turns", "1", "--tools", ""]
                + claude_no_mcp(cli, cwd) + ["--model", model or "haiku"] + claude_flags(cli))
+        env = _env()
+        if scrub_env:
+            for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL"):
+                env.pop(key, None)
         out = subprocess.run(cmd, input=prompt, capture_output=True,
-                             encoding="utf-8", errors="replace", timeout=timeout, env=_env(),
+                             encoding="utf-8", errors="replace", timeout=timeout, env=env,
                              cwd=cwd)
     try:
         data = json.loads(out.stdout or "{}")
@@ -381,4 +387,5 @@ def runner_for(host_name, config):
         return lambda prompt, _m="agent": codex_call(prompt, model=model)
     if host_name == "copilot":
         return lambda prompt, _m="agent": copilot_call(prompt, model=model)
-    return lambda prompt, _m="agent": claude_call(prompt, model=model or "haiku")
+    return lambda prompt, _m="agent": claude_call(
+        prompt, model=model or "haiku", scrub_env=config.sidecall_scrub_env)

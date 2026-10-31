@@ -26,6 +26,11 @@ class LiveContext:
         return self.store.ensure("mechanisms")
 
     @property
+    def facts_store(self):
+        from .facts import prepare
+        return prepare(self)
+
+    @property
     def headless(self):
         return self.is_headless()
 

@@ -271,3 +271,44 @@ def codex_session_usage(rollout_path):
             "output_tokens": int(total.get("output_tokens") or 0) + reasoning,
             "reasoning_output_tokens": reasoning,
             "requests": requests, "model": meta.get("model")}
+
+
+def discover(since, root=None):
+    """Yield rollout metadata from the dated session tree; compressed logs stay unreadable."""
+    import glob
+    from .discovery import timestamp
+    root = root or os.path.expanduser("~/.codex/sessions")
+    for path in sorted(glob.glob(os.path.join(root, "*", "*", "*", "*.jsonl"))):
+        for ev in _records(path):
+            if ev.get("type") != "session_meta":
+                continue
+            meta = ev.get("payload") or {}
+            started = timestamp(meta.get("timestamp") or ev.get("timestamp"))
+            sid = meta.get("id") or meta.get("session_id")
+            if sid and started is not None and started >= since:
+                yield str(sid), path, meta.get("cwd"), started, False
+            break
+
+
+def turns(rollout_path):
+    """Prompt-turn calls with explicit task_complete/task_completed outcome markers."""
+    starts = _turn_starts(rollout_path)
+    lines, ended = [], False
+    for ev in _records(rollout_path):
+        p = ev.get("payload") or {}
+        if starts(ev):
+            if lines:
+                yield codex_exec_calls(lines), ended
+            lines, ended = [], False
+        if ev.get("type") != "event_msg":
+            continue
+        if p.get("type") == "item_completed":
+            item = rollout_item_to_exec(p.get("item") or {})
+            if item:
+                lines.append(json.dumps({"type": "item.completed", "item": item}))
+        elif p.get("type") in ("task_complete", "task_completed"):
+            ended = True
+        elif p.get("type") in ("turn_aborted", "task_aborted"):
+            ended = False
+    if lines:
+        yield codex_exec_calls(lines), ended

@@ -32,13 +32,14 @@ def overhead_total(overhead):
 
 def summarize(records):
     """Aggregate ledger records into the numbers `te status` prints."""
-    sessions = [r for r in records if r.get("kind") == "session"]
+    sessions = [r for r in records if r.get("kind") == "session"
+                and r.get("role") != "sidechain"]
     priced = [r for r in sessions if isinstance(r.get("effective_tokens"), (int, float))]
     exec_total = sum(r["effective_tokens"] for r in priced)
     # `overhead` records are paid calls charged as they happened (the background stuck judge),
     # so a call that outlived its session's fold is still in the account.
     oh_total = sum(overhead_total(r.get("overhead")) for r in records
-                   if r.get("kind") in ("session", "overhead"))
+                   if r.get("kind") in ("session", "overhead", "backfill"))
     return {
         "sessions": len(sessions),
         "priced_sessions": len(priced),

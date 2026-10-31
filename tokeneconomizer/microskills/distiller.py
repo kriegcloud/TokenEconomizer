@@ -632,6 +632,30 @@ class Distiller:
             self._admit(spec)
         self.last_propose = self.now
 
+    def propose_history(self, sessions):
+        """One proposer tick over an explicitly budgeted newest-first history sample.
+
+        The caller budgets the serialized digest prompt plus reserved output. Admission still replays their detectors in
+        chronological order and uses the ordinary grounding and three-confirmation gate.
+        Unlike a live cadence window, this sample is not silently truncated to eight sessions.
+        """
+        window, raw = self.window, self.raw_window
+        self.window, self.raw_window = [], []
+        for iid, path in sessions:
+            dg = build_digest(self.repo, path, iid, None, generic=self.generic)
+            if dg is not None:
+                cmds = bash_cmds(load_calls(path))
+                self.window.append(self._featurize(dg, cmds))
+                self.raw_window.append(cmds)
+        self.now = max(self.now, len(self.window))
+        self._history_newest_first = True
+        try:
+            self._maybe_propose()
+        finally:
+            self._history_newest_first = False
+            self.window = list(reversed(self.window))[-WINDOW:] or window
+            self.raw_window = list(reversed(self.raw_window))[-WINDOW:] or raw
+
     def _admit_extractor(self, spec):
         if spec["name"] in self.extractors or len(self.extractors) >= MAX_EXTRACTORS:
             return False
@@ -663,7 +687,9 @@ class Distiller:
     def _build_fact(self, spec):
         """Fresh Fact replayed over the window -> enters with real lifecycle state."""
         f = Fact(spec)
-        for i, dg in enumerate(self.window):
+        history = (list(reversed(self.window)) if getattr(self, "_history_newest_first", False)
+                   else self.window)
+        for i, dg in enumerate(history):
             self._observe_fact(
                 f, self.now - len(self.window) + i, dg,
                 set(dg["edited_files"]))

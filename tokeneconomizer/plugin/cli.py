@@ -112,7 +112,7 @@ def cmd_status(args):
            "identified_by": ctx.repo.how, "host": ctx.host.name,
            "state": ctx.store.base, "config": cfg.as_dict(), "warnings": cfg.warnings,
            "session_note": _session_note(ctx)}
-    inj = ctx.store.read("injection.json") or {}
+    inj = ctx.facts_store.read("injection.json") or {}
     unt = ctx.store.read("untool.json") or {}
     env_tracker = loopguard.load_envelope(ctx.store, cfg.loopguard_aggr,
                                           cfg.loopguard_thresholds)
@@ -131,9 +131,22 @@ def cmd_status(args):
         "loopguard": {"mode": cfg.loopguard, "envelope": env_tracker.envelope,
                       "ended_green_turns": len(env_tracker.resolved_turns)},
         "ledger": ledger})
+    if getattr(args, "arms", False):
+        from . import arms
+        out["arms"] = arms.summarize(ctx.store.read_lines("ledger.jsonl"))
+        out["arms_caveat"] = (arms.CLAUDE_CAVEAT if ctx.host.name == "claude" else
+            "Persistent checkout settings cannot be restored per session on this host; "
+            "holdout covers context injection and loop-guard actions. Tool pruning uses "
+            "a before/after delta. Historical and unassigned sessions are excluded.")
     if args.json:
         print(json.dumps(out, indent=2, default=str))
         return 0
+    if getattr(args, "arms", False):
+        for arm, values in out["arms"].items():
+            print(f"{arm}: {values['sessions']} sessions, "
+                  f"mean cost {accounting.fmt_tokens(values['mean_cost'])} effective tokens, "
+                  f"mean turns {values['mean_turns']}, redirects {values['mean_redirects']}")
+        print(out["arms_caveat"])
     print(f"TokenEconomizer -- {out['repo']} ({ctx.host.name})")
     print(f"  repository   {ctx.repo.root}, {repos.describe(ctx.repo)}")
     print(f"  state        {out['state']}")
@@ -176,7 +189,7 @@ def cmd_status(args):
 
 def cmd_microskills(args):
     ctx = _ctx(args)
-    inj = ctx.store.read("injection.json") or {}
+    inj = ctx.facts_store.read("injection.json") or {}
     if ctx.config.microskills == "off":
         print(f"micro-skills is off here (the default). `config set microskills=on` turns it on: "
               f"facts are then learned from finished sessions, and a model proposes more every "
@@ -502,6 +515,39 @@ def cmd_config(args):
     return 0
 
 
+def cmd_backfill(args):
+    from . import backfill
+    try:
+        out = backfill.run(args.since, tuple(h.strip() for h in args.hosts.split(",")),
+                           args.repo, args.apply)
+    except (ValueError, RuntimeError) as e:
+        print(f"backfill: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        print("Backfill " + ("applied" if args.apply else "dry run (use --apply to replay)"))
+        for row in out["census"]:
+            print(f"  {row['host']} {row['cwd']}: {row['sessions']} sessions, "
+                  f"{row['sidechains']} sidechains")
+        for row in out["mappings"]:
+            print(f"  inferred {row['cwd']} -> {row['checkout']} ({row['method']})")
+        reasons = {}
+        for row in out["skipped"]:
+            reasons[row["reason"]] = reasons.get(row["reason"], 0) + 1
+        for reason, count in sorted(reasons.items()):
+            print(f"  skipped {count}: {reason}")
+        print(f"  estimated proposer prompt + output reserve: {out['projected_paid_tokens']:.0f} tokens "
+              f"(cap {out['paid_cap']}); {out['folded']} folded")
+        print("  " + out["paid_selection_note"])
+        for paid in out["paid"]:
+            print(f"  paid {paid['repo_key']} ({paid['host']}): "
+                  f"{len(paid['sessions'])} sessions, {paid['estimated_proposer_tokens']:.0f} estimated proposer tokens, "
+                  f"{paid['optimizer_tokens']:.0f} actual optimizer tokens"
+                  + (f"; failed: {paid['error']}" if paid.get("error") else ""))
+    return 0
+
+
 def cmd_fold(args):
     # A session is folded into the repository it is pinned to, wherever `--cwd` points.
     ctx = _session_ctx(args, (args.session or [None])[0])
@@ -717,7 +763,15 @@ def build_parser():
     def add(name, *aliases):
         return sub.add_parser(name, aliases=list(aliases), parents=[common])
 
+    p = add("backfill")
+    p.add_argument("--since", default="30d")
+    p.add_argument("--hosts", default="claude,codex")
+    p.add_argument("--repo")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_backfill)
     p = add("status")
+    p.add_argument("--arms", action="store_true")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
     add("microskills", "facts").set_defaults(fn=cmd_microskills)
@@ -783,7 +837,8 @@ def main(argv=None):
         return args.fn(args) or 0
     finally:
         from .paths import secure_root
-        secure_root()
+        if args.cmd != "backfill" or args.apply:
+            secure_root()
 
 
 if __name__ == "__main__":

@@ -330,12 +330,8 @@ class TurnGuard:
         return call
 
     # ---- one completed tool call ------------------------------------------------------
-    def fold(self, name, args, result, exit_code=None, *, envelope=None, thr=None,
-             judge=None, nudge_budget=1):
-        """Fold one call; return None, ("nudge", reason) or ("abort", reason).
-
-        The body is `NudgeGuard.monitor` for a single completed call."""
-        thr = thr or DEFAULT_THRESHOLDS
+    def observe(self, name, args, result, exit_code=None):
+        """Track a call without consulting a judge or taking any action (replay/holdout)."""
         cmd = (args or {}).get("command") if canon_tool(name) == "bash" else None
         shell_edits = shell_edit_targets(cmd) if cmd is not None else []
         status = status_of_tests(cmd)
@@ -352,6 +348,14 @@ class TurnGuard:
         fold_shell_edits(self.whole, shell_edits)
         self.cum_turns += 1
         self._track(name, args, result, exit_code, shell_edits)
+
+    def fold(self, name, args, result, exit_code=None, *, envelope=None, thr=None,
+             judge=None, nudge_budget=1):
+        """Fold one call; return None, ("nudge", reason) or ("abort", reason).
+
+        The body is `NudgeGuard.monitor` for a single completed call."""
+        thr = thr or DEFAULT_THRESHOLDS
+        self.observe(name, args, result, exit_code)
         if self.aborted:
             return None
 

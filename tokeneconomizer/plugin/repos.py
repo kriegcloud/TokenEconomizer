@@ -853,3 +853,43 @@ def home_git_note(env=None):
                 f"not of the unversioned directories below it")
     return (f"{home}/.git exists but is not a git repository (git ignores it, and so does "
             f"TokenEconomizer)")
+
+
+def resolve_dead(cwd, env=None):
+    """Conservative attribution of a removed lane, returning (RepoId, inference) or None.
+
+    An existing git ancestor wins. A separate `<root>-worktrees` container is inferred only
+    when every matching sibling clone with a remote agrees; an ambiguous family is skipped.
+    """
+    import glob
+    from .paths import find_repo_root
+    if not cwd:
+        return None
+    home = home_dir(env)
+    cur = os.path.abspath(cwd)
+    while cur != home:
+        if os.path.isdir(cur) and find_repo_root(cur, env):
+            repo = repo_identity(cur, env)
+            return repo, {"cwd": cwd, "checkout": repo.root, "remote": repo.remote,
+                          "method": "git ancestor", "repo_key": repo.key}
+        name = os.path.basename(cur)
+        if name.endswith("-worktrees"):
+            prefix = cur[:-len("-worktrees")]
+            candidates = []
+            for path in sorted(glob.glob(prefix + "*")):
+                if path == cur or not os.path.isdir(path) or not is_git_entry(
+                        os.path.join(path, ".git")):
+                    continue
+                repo = repo_identity(path, env)
+                candidates.append(repo)
+            remotes = {r.remote for r in candidates}
+            if len(remotes) == 1 and "" not in remotes:
+                repo = candidates[0]
+                return repo, {"cwd": cwd, "checkout": repo.root, "remote": repo.remote,
+                              "method": "unanimous sibling remotes", "repo_key": repo.key}
+            return None
+        parent = os.path.dirname(cur)
+        if parent == cur or parent == home:
+            break
+        cur = parent
+    return None

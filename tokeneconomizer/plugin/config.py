@@ -160,6 +160,11 @@ class LiveConfig:
     repomap_tokens: int = 2048
     repomap_python: str = ""
     repomap_timeout: int = 8
+    backfill_resolve_dead: bool = False
+    backfill_paid_cap: int = 500000
+    microskills_scope: str = "host"
+    holdout: float = 0.0
+    sidecall_scrub_env: bool = False
     paid_model: str = ""
     shadow: bool = False
     vocabulary: str = "auto"
@@ -167,9 +172,10 @@ class LiveConfig:
 
     _CHOICES = {"mode": MODES, "microskills": MICROSKILLS, "toolprune": TOOLPRUNE,
                 "loopguard": LOOPGUARD, "repomap": REPOMAP, "loopguard_aggr": AGGR,
+                "microskills_scope": ("host", "repo"),
                 "vocabulary": ("auto", "generic", "python-git", "node-web")}
     # The smallest value a number setting takes, where it is not 1.
-    _MIN = {"toolprune_quiet_minutes": 0}
+    _MIN = {"toolprune_quiet_minutes": 0, "backfill_paid_cap": 0}
 
     def as_dict(self):
         d = asdict(self)
@@ -209,6 +215,10 @@ class LiveConfig:
             elif isinstance(cur, bool):
                 v = value if isinstance(value, bool) else str(value).strip().lower() in (
                     "1", "true", "yes", "on")
+            elif isinstance(cur, float):
+                v = float(value)
+                if not math.isfinite(v) or not 0 <= v < 1:
+                    raise ValueError("must be finite and in [0, 1)")
             elif isinstance(cur, int):
                 v = int(value)
                 lo = self._MIN.get(key, 1)
@@ -271,6 +281,9 @@ _ENV = {"TE_MODE": "mode", "TE_SHADOW": "shadow",
         "TE_LOOPGUARD_NUDGES": "loopguard_nudges",
         "TE_REPOMAP": "repomap", "TE_REPOMAP_TOKENS": "repomap_tokens",
         "TE_REPOMAP_PYTHON": "repomap_python", "TE_REPOMAP_TIMEOUT": "repomap_timeout"}
+_ENV.update({"TE_" + k.upper(): k for k in (
+    "backfill_resolve_dead", "backfill_paid_cap", "microskills_scope", "holdout",
+    "sidecall_scrub_env")})
 _ENV_THRESHOLDS = ("TE_SPIRAL_THRESHOLDS", "TE_LOOPGUARD_THRESHOLDS")
 
 

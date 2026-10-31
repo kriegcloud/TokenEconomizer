@@ -76,10 +76,21 @@ existing per-agent facts in, keeping the most-confirmed copy of any duplicate.
 
 ### 5. One capped paid pass (WS3, WS14)
 
-`te backfill --apply` ends with one proposer run over the most recent main sessions that fit
-inside `backfill_paid_cap` (default 500000 effective tokens; 0 skips the pass). It feeds them
-newest-first into the distiller's proposal prompt until the next one would pass the cap. Facts
-it proposes still need the usual 3 confirmations; backfilled sessions confirm as usual.
+`te backfill --apply` ends with one proposer run over recent main-session digests, selected
+newest-first until the next digest would exceed `backfill_paid_cap` (default 500000; 0 skips).
+The cap estimates the paid pass itself: serialized digest prompt characters / 4, including
+fixed proposer instructions once, plus 4096 reserved output tokens. Original sessions' effective
+usage does not consume this budget. `projected_paid_tokens` reports the estimate; actual
+optimizer overhead remains separate. The complete prepared prompt is checked again before
+calling, including learned facts and features. This estimate is not a provider billing guarantee.
+History proposals have no digest-count bound; the live eight-digest window does not truncate them.
+
+Choose `--repo` when supplied, else cwd's git repository when resolvable, else the fact stream
+with the most candidate main sessions in the window. Within a repository, choose the busiest
+fact stream (hosts pool only with repo scope). Ties favor newest session, then stream path.
+A resolved cwd repository without candidates gets no paid call. Free replay still covers all
+candidate repositories. Facts proposed still need the usual 3 confirmations; backfilled
+sessions confirm as usual.
 
 ### 6. Session holdout (upstreamable; WS5)
 

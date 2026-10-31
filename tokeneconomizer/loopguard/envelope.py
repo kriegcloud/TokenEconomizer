@@ -159,6 +159,7 @@ def load_envelope(store, level="default", overrides=None):
     ov = overrides or {}
     tracker = EnvelopeTracker(level=level, **{
         arg: ov[key] for key, arg in _ENVELOPE_KEYS.items() if key in ov})
+    tracker.samples = list(d.get("samples") or [])
     tracker.resolved_turns = [int(x) for x in d.get("resolved_turns", []) if x]
     tracker.resolved_snaps = [s for s in d.get("resolved_snaps", []) if isinstance(s, dict)]
     return tracker
@@ -187,6 +188,7 @@ def base_thresholds(level="default", overrides=None):
 def save_envelope(store, tracker):
     store.write("envelope.json", {
         "level": tracker.level,
+        "samples": getattr(tracker, "samples", [])[-ENVELOPE_HISTORY:],
         "resolved_turns": tracker.resolved_turns[-ENVELOPE_HISTORY:],
         "resolved_snaps": tracker.resolved_snaps[-ENVELOPE_HISTORY:]})
 

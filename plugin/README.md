@@ -535,6 +535,55 @@ as `loopguard=stop`, which works as `nudge`), and a new name set alongside its o
 `config set` writes the new name. The earlier commands `te facts` and `te untool`, and
 `/tokeneconomizer:facts` and `/tokeneconomizer:untool`, still work.
 
+### Warm start and session arms
+
+`te backfill [--since 30d] [--hosts claude,codex] [--repo PATH] [--apply] [--json]`
+reads saved Claude Code and Codex logs. Without `--apply` it prints a census and writes no
+state. The window accepts days (`30d`), hours (`12h`) or weeks (`2w`). Logs modified within
+ten minutes are skipped as potentially active. Apply replays new sessions oldest first through
+free observers, including envfacts even when live micro-skills are off. Sidechains supply only
+facts. Tool pruning gathers proposals without changing checkout settings. Completed main turns
+supply envelope samples tagged `source=backfill`; interrupted or unfinished turns do not.
+
+The final paid pass selects newest-first until adding the next digest would exceed the cap.
+It builds the same digests the distiller sends, estimates serialized prompt tokens at one token
+per four characters (including fixed proposer instructions once), and reserves 4096 output
+tokens. `projected_paid_tokens` reports this estimated proposer cost, independent of the source
+sessions' effective usage, which may be millions of tokens or unknown. Actual optimizer
+overhead is recorded separately. This is an estimate, not a provider billing guarantee; the
+fully prepared prompt is checked again before calling, including learned facts and features.
+There is no history digest-count bound: the live eight-digest window does not truncate this pass.
+
+There is at most one proposer call per command. Its repository is `--repo` when supplied,
+otherwise the current working directory's git repository when resolvable. Without either,
+choose the fact stream with the most candidate main sessions in the window. Within a selected
+repository, choose its busiest fact stream; ties favor the newest session, then stream path.
+`microskills_scope=repo` pools both hosts; otherwise host streams remain separate. A resolved
+cwd repository with no candidates produces no paid sample. Other streams still receive free
+replay. Use `--repo` and `--hosts` to target the sample explicitly. The command uses the smallest
+configured cap among candidate repositories. A no-op rerun makes no paid call. Proposals retain
+the ordinary grounding, confirmation and firing gates.
+
+Additional Settings (repository config, global config, or the named environment variable):
+
+| Setting | Default | Environment variable | Meaning |
+| --- | --- | --- | --- |
+| `backfill_resolve_dead` | `off` | `TE_BACKFILL_RESOLVE_DEAD` | Infer removed lanes from an existing git ancestor or unanimous sibling-clone remotes; log in `<state>/backfill-mappings.jsonl`. Ambiguous lanes are skipped. |
+| `backfill_paid_cap` | `500000` | `TE_BACKFILL_PAID_CAP` | Estimated proposer prompt tokens plus reserved output for the final pass; `0` skips it. |
+| `microskills_scope` | `host` | `TE_MICROSKILLS_SCOPE` | `repo` stores micro-skills under `repos/<key>/_shared/`, copying host facts and keeping the most-confirmed duplicate. Originals remain available. Tools and envelopes remain per host. |
+| `holdout` | `0` | `TE_HOLDOUT` | Fraction in `[0, 1)` assigned by the first eight hex digits of SHA-256 of the session id. Assignment persists through resume. Held-out sessions receive no learned context or map and no loop-guard actions; they still learn and accrue ledger cost. |
+| `sidecall_scrub_env` | `off` | `TE_SIDECALL_SCRUB_ENV` | Strip `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL` from Claude side-call children. |
+
+`te status --arms [--json]` reports priced mean effective cost (including session overhead),
+mean turns and redirects for treated and held-out live sessions. Historical and unassigned
+sessions are excluded. Claude Code's deny list in `.claude/settings.local.json` affects every
+session in a checkout and cannot be undone per session. Holdout therefore covers micro-skills,
+repository maps and the loop guard; tool pruning must be measured as a before/after delta.
+The other supported hosts also use persistent checkout settings rather than a session override.
+For the workstation trial set `paid_model=claude-opus-5-5` and `sidecall_scrub_env=on`; upstream
+model selection and all live defaults remain unchanged.
+
+
 ## Repository map
 
 An opt-in fourth mechanism: aider's map of the repository's key files and symbols (signatures

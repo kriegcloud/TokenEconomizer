@@ -19,13 +19,14 @@ Each session is folded once, at its first end, keyed by session id; a resumed se
 re-folded, because counting the same trajectory twice would hand the fact lifecycle confirmations
 it did not earn.
 """
+import contextlib
 import os
 import shutil
 import tempfile
 import time
 
 from .. import trace
-from . import accounting, denylist, sidecall
+from . import accounting, arms, denylist, facts, sidecall
 from . import adapter as live_adapter
 from .adapter import LiveAdapter, load_catalog
 
@@ -63,8 +64,18 @@ def _run_dir(workdir, trace_path):
     return run
 
 
-def _fold_microskills(ctx, adapter, run_dir, session_id, injected=None):
-    profile = ctx.config.microskills
+def _fold_microskills(ctx, adapter, run_dir, session_id, injected=None, profile=None,
+                      envfacts_only=False):
+    requested = profile or ctx.config.microskills
+    profile = requested
+    dst = facts.store_for(ctx)
+    manual = dst.path("mechanisms", "manual_state",
+                      ctx.repo.label.replace("/", "__") + ".json")
+    # A one-time history proposal still earns confirmations in future free folds. Merely
+    # loading its detectors must never turn envfacts into a recurring paid profile.
+    if (profile == "envfacts" and not envfacts_only and os.path.isfile(manual)
+            and dst.read("backfill-proposer.json")):
+        profile = "envfacts+distiller"
     if profile == "off":
         return None
     from tokeneconomizer.config import InjectionConfig
@@ -76,8 +87,8 @@ def _fold_microskills(ctx, adapter, run_dir, session_id, injected=None):
     # Paused once the host's CLI said it is not signed in (`sidecall.paused`): the free layer
     # still learns.
     runner = (sidecall.runner_for(ctx.host.name, ctx.config)
-              if icfg.paid and not sidecall.paused(ctx.host.name, ctx.root) else None)
-    stage = PrefixStage(icfg, ctx.repo.label, ctx.mech_dir, False, runner=runner,
+              if "distiller" in requested and not sidecall.paused(ctx.host.name, ctx.root) else None)
+    stage = PrefixStage(icfg, ctx.repo.label, dst.ensure("mechanisms"), False, runner=runner,
                         optimizer_model="agent", adapter=adapter, agent=ctx.host.name)
     srow = {"resolved": None}
     task = {"instance_id": session_id}
@@ -85,8 +96,8 @@ def _fold_microskills(ctx, adapter, run_dir, session_id, injected=None):
         task["injected_ids"] = injected
     opt_tokens, reason = stage.after_task(task, {}, run_dir, srow)
     rendered = stage.render() or ""
-    prior = ctx.store.read("injection.json") or {}
-    ctx.store.write("injection.json", {
+    prior = dst.read("injection.json") or {}
+    dst.write("injection.json", {
         "profile": profile, "reason": reason, "rendered": rendered,
         "rendered_ids": stage.injected_ids(),
         "facts": srow.get("manual_facts"), "updated": time.time(),
@@ -355,7 +366,7 @@ def schedule_pending(ctx):
 CODEX_HIGH_RISK = frozenset({"image_media"})
 
 
-def fold_session(ctx, session_id, transcript_path=None):
+def fold_session(ctx, session_id, transcript_path=None, role="main", source=None):
     """Fold one finished session. Returns the ledger record, or None if already folded."""
     sess_name = os.path.join("sessions", f"{session_id}.json")
     with ctx.store.locked("fold", timeout=FOLD_LOCK_WAIT_S) as got:
@@ -365,11 +376,14 @@ def fold_session(ctx, session_id, transcript_path=None):
         if session_id in folded:
             return None
         sess = ctx.store.read(sess_name) or {}
+        role = sess.get("role", role)
+        source = sess.get("source", source)
         transcript = transcript_path or sess.get("transcript")
         record = {"kind": "session", "session_id": session_id, "host": ctx.host.name,
                   "repo": ctx.repo.label, "folded_at": time.time(),
                   "started": sess.get("started"), "ended": sess.get("ended"),
-                  "shadow": ctx.config.shadow}
+                  "shadow": ctx.config.shadow, "role": role, "source": source,
+                  "arm": sess.get("arm") or arms.assignment(session_id, ctx.config.holdout)}
         workdir = tempfile.mkdtemp(prefix="te-fold-")
         try:
             trace_path = ctx.host.mechanism_trace(transcript, workdir) if transcript else None
@@ -385,13 +399,26 @@ def fold_session(ctx, session_id, transcript_path=None):
                 adapter = LiveAdapter(ctx.host, ctx.repo.root, vocabulary=ctx.config.vocabulary,
                                       catalog=load_catalog(ctx.root, ctx.host.name),
                                       protect=ctx.config.toolprune_protect)
-                with ctx.store.locked("mechanisms"):
+                dst = facts.store_for(ctx)
+                with contextlib.ExitStack() as locks:
+                    if not locks.enter_context(dst.locked("mechanisms", timeout=FOLD_LOCK_WAIT_S)):
+                        return None
+                    facts.migrate(ctx, dst)
+                    if dst.base != ctx.store.base and not locks.enter_context(
+                            ctx.store.locked("mechanisms", timeout=FOLD_LOCK_WAIT_S)):
+                        return None
                     inj = _fold_microskills(ctx, adapter, run_dir, session_id,
-                                            injected=sess.get("injected_ids"))
-                    # A session that ran no prompt is no evidence about the tools.
-                    unt = None if prompts == 0 else _fold_toolprune(
+                                            injected=sess.get("injected_ids"),
+                                            profile="envfacts" if role == "sidechain"
+                                            or source == "backfill" else None,
+                                            envfacts_only=role == "sidechain")
+                    # Sidechains carry facts but no evidence about the parent's tool set.
+                    unt = None if role == "sidechain" or prompts == 0 else _fold_toolprune(
                         ctx, adapter, run_dir, session_id, transcript=transcript,
                         workdir=workdir, prompts=prompts)
+                if source == "backfill" and role != "sidechain":
+                    from .backfill import record_envelope
+                    record["backfill_turns"] = record_envelope(ctx, session_id, transcript)
                 record["injection"] = inj
                 record["untool"] = unt
                 if unt and unt.get("pending"):
@@ -405,7 +432,7 @@ def fold_session(ctx, session_id, transcript_path=None):
                 record["effective_tokens"], record["priced_by"] = eff, priced_by
             turns = sess.get("turns") or []
             record.update({
-                "turns": len(turns),
+                "turns": record.get("backfill_turns", len(turns)),
                 "nudges": int(sess.get("nudges", 0)), "aborts": int(sess.get("aborts", 0)),
                 "injected_chars": int(sess.get("injected_chars", 0)),
                 "untool_applied": denylist.applied_for(ctx.store, ctx.repo.root, ctx.host.name),
