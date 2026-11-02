@@ -217,10 +217,10 @@ def _toolprune_show(ctx, unt):
           f"{denylist.settings_path(ctx.repo.root, host)}): "
           f"{', '.join(denylist.applied_for(ctx.store, ctx.repo.root, host)) or '-'}")
     print(f"proposed: {', '.join(_proposal(ctx, unt)) or '-'}")
-    pending = [t for t in (unt.get("auto_pending") or {}).get("items") or []
-               if t in _proposal(ctx, unt)]
+    mine = fold.pending_by_root(unt).get(ctx.repo.root) or {}
+    pending = [t for t in mine.get("items") or [] if t in _proposal(ctx, unt)]
     if pending and ctx.config.toolprune == "auto":
-        print(f"pending: written once this repository's sessions have been idle "
+        print(f"pending: written once this checkout's sessions have been idle "
               f"{ctx.config.toolprune_quiet_minutes} minutes, so that no conversation you "
               f"resume re-reads its cached prompt (`toolprune apply` writes it now)")
     kept = denylist.kept_for(ctx.store, ctx.repo.root, host)

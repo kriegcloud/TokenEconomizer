@@ -689,7 +689,7 @@ def test_by_default_a_deny_list_waits_until_the_repositorys_sessions_have_been_i
     env, ctx = _pending_repo(env, repo, tmp_path)
     assert _deny(repo) == []
     pend = ctx.store.read("untool.json")["auto_pending"]
-    assert sorted(pend["items"]) == ["CronCreate", "ShareOnboardingGuide", "Workflow"]
+    assert sorted(pend[repo]["items"]) == ["CronCreate", "ShareOnboardingGuide", "Workflow"]
     t = str(tmp_path / "next.jsonl")
     open(t, "w").close()
 
@@ -700,7 +700,7 @@ def test_by_default_a_deny_list_waits_until_the_repositorys_sessions_have_been_i
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     assert cli.main(["--host", "claude", "--cwd", repo, "toolprune", "show"]) == 0
-    assert "pending: written once this repository's sessions have been idle 60 minutes" in (
+    assert "pending: written once this checkout's sessions have been idle 60 minutes" in (
         capsys.readouterr().out)
     now = time.time()
     wait = fold.apply_pending(ctx, now=now + 600)                   # ten idle minutes: not yet
@@ -729,10 +729,66 @@ def test_a_deny_list_that_waited_a_day_is_written_even_if_sessions_never_pause(
         env, repo, tmp_path):
     env, ctx = _pending_repo(env, repo, tmp_path)
     st = ctx.store.read("untool.json")
-    st["auto_pending"]["since"] = time.time() - fold.PENDING_MAX_S - 1
+    st["auto_pending"][repo]["since"] = time.time() - fold.PENDING_MAX_S - 1
     ctx.store.write("untool.json", st)
     assert fold.apply_pending(ctx) is None and len(_deny(repo)) == 3
 
+
+
+def _clone(repo, tmp_path, name):
+    """Another checkout of the same repository (same origin), so it shares the repo's state."""
+    import shutil
+    dst = str(tmp_path / name)
+    shutil.copytree(repo, dst)
+    return dst
+
+
+def test_each_checkout_keeps_its_own_pending_deny_list(env, repo, tmp_path):
+    """Clones share the evidence but each has its own settings file: a fold in one must not
+    replace the list another is still waiting to write."""
+    env, ctx = _pending_repo(env, repo, tmp_path)
+    other = _clone(repo, tmp_path, "clone")
+    t = write_session(str(tmp_path / "c0.jsonl"), [("look", [
+        ("Read", {"file_path": f"{other}/a.py"}, "x", False)]), ("and again", [])])
+    run_session(env, other, "c0", t)
+    pend = ctx.store.read("untool.json")["auto_pending"]
+    assert set(pend) == {repo, other}
+    assert sorted(pend[repo]["items"]) == ["CronCreate", "ShareOnboardingGuide", "Workflow"]
+
+
+def test_a_checkout_waits_only_for_its_own_sessions(env, repo, tmp_path):
+    """A session busy in another clone does not hold this checkout's list back."""
+    env, ctx = _pending_repo(env, repo, tmp_path)
+    other = _clone(repo, tmp_path, "clone")
+    old = time.time() - 7200
+    for f in glob.glob(ctx.store.path("sessions", "*.json")) + glob.glob(str(tmp_path / "u*.jsonl")):
+        os.utime(f, (old, old))
+    busy = str(tmp_path / "busy.jsonl")
+    open(busy, "w").close()
+    ctx.store.write(os.path.join("sessions", "busy.json"), {"cwd": other, "transcript": busy})
+    assert fold.last_activity(ctx) > time.time() - 60          # the repository is not quiet
+    assert fold.last_activity(ctx, repo) < time.time() - 3600  # this checkout is
+    assert fold.apply_pending(ctx) is None and len(_deny(repo)) == 3
+    assert not os.path.exists(denylist.settings_path(other))
+
+
+def test_a_pending_list_for_a_retired_checkout_is_dropped(env, repo, tmp_path):
+    env, ctx = _pending_repo(env, repo, tmp_path)
+    st = ctx.store.read("untool.json")
+    gone = str(tmp_path / "retired-lane")
+    st["auto_pending"][gone] = {"items": ["Workflow"], "since": time.time()}
+    ctx.store.write("untool.json", st)
+    assert fold.apply_pending(ctx, now=time.time() + 3700) is None
+    assert not os.path.exists(gone) and "auto_pending" not in ctx.store.read("untool.json")
+
+
+def test_a_single_pending_list_from_an_older_version_is_still_written(env, repo, tmp_path):
+    env, ctx = _pending_repo(env, repo, tmp_path)
+    st = ctx.store.read("untool.json")
+    st["auto_pending"] = {"items": st["auto_pending"][repo]["items"], "root": repo,
+                          "since": time.time()}
+    ctx.store.write("untool.json", st)
+    assert fold.apply_pending(ctx, now=time.time() + 3700) is None and len(_deny(repo)) == 3
 
 def test_a_pending_deny_list_leaves_out_what_was_given_back_meanwhile(env, repo, tmp_path):
     env, ctx = _pending_repo(env, repo, tmp_path)

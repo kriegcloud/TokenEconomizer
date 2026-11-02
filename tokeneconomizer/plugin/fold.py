@@ -45,10 +45,11 @@ FOLD_LOCK_WAIT_S = sidecall.TIMEOUT_S + 60
 # sends the new ones, so its whole history is written to the prompt cache again instead of read
 # from it (both verified on Claude Code 2.1.307, Codex 0.163.0 and Copilot 1.0.102). The fold
 # runs just after a session ends, when that session's cache is warmest and resuming it is
-# likeliest, so `auto` holds a new list as pending and writes it only once every session of the
-# repository has been idle longer than a prompt cache lives (`toolprune_quiet_minutes`): then a
-# resumed or new session finds the cache cold anyway. A list that has waited a day is written
-# regardless, so a repository whose sessions never pause still gets it.
+# likeliest, so `auto` holds a new list as pending and writes it only once every session in that
+# checkout has been idle longer than a prompt cache lives (`toolprune_quiet_minutes`): then a
+# resumed or new session finds the cache cold anyway. The settings file is per checkout, so each
+# clone or worktree of the repository waits for its own sessions only. A list that has waited a
+# day is written regardless, so a checkout whose sessions never pause still gets it.
 PENDING_MAX_S = 24 * 3600
 WAITER_POLL_S = 600     # how often the waiter looks again, and so how fresh its heartbeat is
 
@@ -288,19 +289,38 @@ def _fold_toolprune_codex(ctx, adapter, session_id, transcript, workdir, prompts
             "restored": []}
 
 
+def pending_by_root(unt):
+    """{checkout root: {items, since}} -- the `auto` lists still waiting, one per checkout. A
+    repository's clones and worktrees share this state, but each has its own settings file, so
+    each waits for its own quiet. Reads the single-list form older versions wrote."""
+    pend = unt.get("auto_pending") or {}
+    if "items" in pend:
+        return {pend["root"]: {"items": pend["items"], "since": pend.get("since")}} \
+            if pend.get("root") else {}
+    return dict(pend)
+
+
 def _hold(doc, prior, proposal, root):
-    """`auto`: keep the proposal as pending for `apply_pending`, from when it first waited. A
-    refusal to write the file (a committed or unparseable one) stands until a write succeeds."""
-    pend = prior.get("auto_pending") or {}
-    doc["auto_pending"] = {"items": list(proposal), "root": root,
-                           "since": pend.get("since") or time.time()}
+    """`auto`: keep the proposal as pending for `apply_pending` under this checkout, from when it
+    first waited there; other checkouts' pending lists stay as they were. A refusal to write the
+    file (a committed or unparseable one) stands until a write succeeds."""
+    pend = pending_by_root(prior)
+    pend[root] = {"items": list(proposal),
+                  "since": (pend.get(root) or {}).get("since") or time.time()}
+    doc["auto_pending"] = pend
     if prior.get("auto_apply_refused"):
         doc["auto_apply_refused"] = prior["auto_apply_refused"]
 
 
-def last_activity(ctx):
+def _within(path, root):
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def last_activity(ctx, root=None):
     """When a session of this repository on this agent last did anything: a hook call (its
-    record's write) or a line in its own session log, whichever is later; 0 when none did."""
+    record's write) or a line in its own session log, whichever is later; 0 when none did. With
+    `root`, only sessions that ran in that checkout count (a session with no recorded folder
+    counts everywhere): another clone's session does not read this checkout's settings file."""
     latest = 0.0
     sess_dir = ctx.store.path("sessions")
     try:
@@ -308,11 +328,14 @@ def last_activity(ctx):
     except OSError:
         return latest
     for name in names:
+        sess = ctx.store.read(os.path.join("sessions", name)) or {}
+        if root and sess.get("cwd") and not _within(sess["cwd"], root):
+            continue
         try:
             latest = max(latest, os.path.getmtime(os.path.join(sess_dir, name)))
         except OSError:
             continue
-        tp = (ctx.store.read(os.path.join("sessions", name)) or {}).get("transcript")
+        tp = sess.get("transcript")
         try:
             latest = max(latest, os.path.getmtime(tp)) if tp else latest
         except OSError:
@@ -321,35 +344,43 @@ def last_activity(ctx):
 
 
 def apply_pending(ctx, now=None):
-    """Write the pending `auto` deny list once the repository has been quiet long enough (see
-    PENDING_MAX_S). Returns the seconds to wait before looking again, or None when there is
-    nothing left to wait for: written, refused, given back or applied by hand meanwhile, or
-    `toolprune` is no longer `auto`."""
+    """Write each checkout's pending `auto` deny list once that checkout's sessions have been
+    quiet long enough (see PENDING_MAX_S). Returns the seconds to wait before looking again, or
+    None when there is nothing left to wait for: every list written, refused, given back or
+    applied by hand meanwhile, its checkout gone, or `toolprune` no longer `auto`."""
     now = now or time.time()
     with ctx.store.locked("mechanisms"):
         unt = ctx.store.read("untool.json") or {}
-        pend = unt.get("auto_pending")
+        pend = pending_by_root(unt)
         if not pend:
             return None
-        root = pend.get("root") or ctx.repo.root
-        done = set(denylist.applied_for(ctx.store, root, ctx.host.name))
-        done |= set(denylist.kept_for(ctx.store, root, ctx.host.name))
-        items = [t for t in pend.get("items") or [] if t not in done]
-        if items and ctx.config.toolprune == "auto" and not ctx.config.shadow:
-            idle = now - last_activity(ctx)
-            quiet_s = ctx.config.toolprune_quiet_minutes * 60
-            waited = now - float(pend.get("since") or now)
+        live = ctx.config.toolprune == "auto" and not ctx.config.shadow
+        quiet_s = ctx.config.toolprune_quiet_minutes * 60
+        waits, left = [], {}
+        for root, entry in pend.items():
+            done = set(denylist.applied_for(ctx.store, root, ctx.host.name))
+            done |= set(denylist.kept_for(ctx.store, root, ctx.host.name))
+            items = [t for t in entry.get("items") or [] if t not in done]
+            if not (items and live and os.path.isdir(root)):
+                continue                   # nothing left, no longer `auto`, or a retired lane
+            idle = now - last_activity(ctx, root)
+            waited = now - float(entry.get("since") or now)
             if idle < quiet_s and waited < PENDING_MAX_S:
-                return min(quiet_s - idle, PENDING_MAX_S - waited)
+                waits.append(min(quiet_s - idle, PENDING_MAX_S - waited))
+                left[root] = entry
+                continue
             try:
                 unt["auto_applied"] = denylist.apply(root, items, ctx.store, host=ctx.host.name)
                 unt["proposal"] = [t for t in unt.get("proposal") or [] if t not in items]
                 unt.pop("auto_apply_refused", None)
             except RuntimeError as e:      # an unreadable, committed or redirected file
                 unt["auto_apply_refused"] = str(e)
-        unt.pop("auto_pending", None)
+        if left:
+            unt["auto_pending"] = left
+        else:
+            unt.pop("auto_pending", None)
         ctx.store.write("untool.json", unt)
-        return None
+        return min(waits) if waits else None
 
 
 def schedule_pending(ctx):
