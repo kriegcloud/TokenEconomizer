@@ -190,7 +190,9 @@ def kept_by_path(doc):
     """{settings file: [entries the person gave back with `restore`]}: never applied again by
     `toolprune: auto`, which would otherwise remove them at the next fold."""
     kept = doc.get("kept")
-    return {_canon(p): list(t or []) for p, t in kept.items()} if isinstance(kept, dict) else {}
+    if not isinstance(kept, dict):
+        return {}
+    return {(p if p == REPO_KEPT else _canon(p)): list(t or []) for p, t in kept.items()}
 
 
 def write_applied(store, by_path, kept=None):
@@ -201,19 +203,25 @@ def write_applied(store, by_path, kept=None):
                           "updated": time.time()})
 
 
+# What the person gave back is about the repository, not one checkout: a tool restored in one
+# clone or worktree lane is wanted in every other one, so `kept` holds a repository-wide list
+# under this key. Per-file lists written before it are still honoured, pooled into it.
+REPO_KEPT = "*"
+
+
 def kept_for(store, repo_root, host="claude"):
-    """What the person gave back in this checkout, which `auto` must leave alone."""
-    return list(kept_by_path(store.read(APPLIED) or {}).get(
-        _canon(settings_path(repo_root, host))) or [])
+    """What the person gave back in this repository (any checkout), which `auto` must leave
+    alone."""
+    kept = kept_by_path(store.read(APPLIED) or {})
+    return sorted(set().union(*kept.values())) if kept else []
 
 
 def set_kept(store, repo_root, host, add=(), remove=()):
     """Mark entries as given back by the person (`restore`), or no longer (`apply` by name)."""
     doc = store.read(APPLIED) or {}
-    kept = kept_by_path(doc)
-    path = _canon(settings_path(repo_root, host))
-    kept[path] = sorted((set(kept.get(path) or []) | set(add)) - set(remove))
-    write_applied(store, applied_by_path(doc), kept)
+    pooled = set(kept_for(store, repo_root, host))
+    write_applied(store, applied_by_path(doc),
+                  {REPO_KEPT: sorted((pooled | set(add)) - set(remove))})
 
 
 def applied(store, path=None):

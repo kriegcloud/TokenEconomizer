@@ -366,7 +366,8 @@ repository is not used by Codex there), while settings are shared by every agent
   loses its prompt cache (a list that has waited a day is written anyway), and it applies from the
   next session, whose start says so once. `toolprune` shows a list still waiting.
   `toolprune restore` gives back what the plugin removed, and only that; what you give back is
-  never removed again (`toolprune apply NAME` removes one again). With `toolprune=propose`, the
+  never removed again, in any clone or worktree of the repository (`toolprune apply NAME` removes
+  one again). With `toolprune=propose`, the
   list is only proposed, the session start says so, and nothing changes until you run
   `toolprune apply`. `toolprune=off` stops new lists but leaves an applied one in place;
   `toolprune restore` gives the tools back. A settings file the plugin creates is added to

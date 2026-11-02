@@ -539,3 +539,18 @@ def test_spawn_runs_in_state_when_the_checkout_is_gone(tmp_path, monkeypatch):
     monkeypatch.setattr(context_mod.subprocess, "Popen", lambda cmd, **kw: seen.update(kw))
     ctx.spawn(["fold", "--session", "s"], "fold.log")
     assert seen["cwd"] == ctx.store.base
+
+
+def test_kept_tools_are_repository_wide(tmp_path):
+    from tokeneconomizer.plugin import denylist
+    from tokeneconomizer.plugin.store import Store
+    store = Store(str(tmp_path / "state"))
+    a, b = str(tmp_path / "clone-a"), str(tmp_path / "clone-b")
+    # A per-file list written before the change is still honoured, in every checkout.
+    denylist.write_applied(store, {}, {denylist._canon(denylist.settings_path(a)): ["Old"]})
+    assert denylist.kept_for(store, b) == ["Old"]
+    denylist.set_kept(store, a, "claude", add=["Gmail", "Box"])
+    assert denylist.kept_for(store, b) == ["Box", "Gmail", "Old"]
+    denylist.set_kept(store, b, "claude", remove=["Box"])
+    assert denylist.kept_for(store, a) == ["Gmail", "Old"]
+    assert list((store.read(denylist.APPLIED) or {})["kept"]) == [denylist.REPO_KEPT]
