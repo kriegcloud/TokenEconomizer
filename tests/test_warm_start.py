@@ -527,3 +527,15 @@ def test_paid_runner_caps_claude_output(monkeypatch):
     seen.clear()
     sidecall.claude_call("p", model="claude-opus-5-5", cli="claude")
     assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in seen
+
+
+def test_spawn_runs_in_state_when_the_checkout_is_gone(tmp_path, monkeypatch):
+    import shutil
+    from tokeneconomizer.plugin import context as context_mod
+    repo = checkout(tmp_path / "lane")
+    ctx = context(repo)
+    shutil.rmtree(repo)
+    seen = {}
+    monkeypatch.setattr(context_mod.subprocess, "Popen", lambda cmd, **kw: seen.update(kw))
+    ctx.spawn(["fold", "--session", "s"], "fold.log")
+    assert seen["cwd"] == ctx.store.base
